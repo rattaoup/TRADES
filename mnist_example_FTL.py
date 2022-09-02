@@ -234,12 +234,12 @@ def main():
         test(args, model, device, test_loader)
         
         # Save_model
-        # torch.save(model.state_dict(), './checkpoint/'+ 'MNIST' + '_epoch_'+ str(epoch) + '.pth')
+        
         
 
 
     if (args.save_model):
-        torch.save(model.state_dict(), "mnist_cnn.pt")
+        torch.save(model.state_dict(), './checkpoint/'+ 'MNIST'  + '_'+ str(args.model_window) + '_' + str(args.data_window)  + '_epoch_'+ str(epoch)+ '.pth')
 
 
 if __name__ == '__main__':
