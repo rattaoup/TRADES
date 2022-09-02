@@ -8,6 +8,7 @@ from torchvision import datasets, transforms
 from trades import trades_loss
 import os
 import os.path
+from torch.utils.data import Dataset
 
 
 class Net(nn.Module):
@@ -63,7 +64,7 @@ class FTL_PGD():
             for model in self.model_list:
                 model.eval()
                 outputs = model(adv_images)
-                cost += self.loss(outputs, labels)
+                cost += self.loss(outputs, labels.reshape(-1))
 
             # Update adversarial images
             grad = torch.autograd.grad(cost, adv_images,
@@ -77,6 +78,7 @@ class FTL_PGD():
 
 def gen_save_adv_example(attacker, train_data, data_name, epoch):
     for  index, (x, y) in enumerate(train_data):
+        x,y = torch.tensor(x).detach(), torch.tensor(y).detach()
         x_adv = attacker.atk(x,y).detach()
         path_x = os.path.join( os.getcwd(),'data', data_name , 'epoch_'+ str(epoch), 'X')
         path_y = os.path.join( os.getcwd(),'data', data_name , 'epoch_'+ str(epoch), 'y')
@@ -220,7 +222,7 @@ def main():
         # Train on the stacked train_loader
         train(args, model, device, train_loader_i, optimizer, epoch)
         test(args, model, device, test_loader)
-        
+
         # Save_model
         torch.save(model.state_dict(), 'checkpoint/'+ 'MNIST' + '_epoch_'+ str(epoch))
         model_temp = copy.deepcopy(model)
