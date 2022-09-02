@@ -11,3 +11,4 @@ gen
 data/*
 *.pyc
 checkpoint/*
+old_stuff/*
