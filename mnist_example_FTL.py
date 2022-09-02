@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torchvision import datasets, transforms
 from trades import trades_loss
+from tqdm import tqdm
 import os
 import os.path
 from torch.utils.data import Dataset
@@ -77,7 +78,7 @@ class FTL_PGD():
         return adv_images
 
 def gen_save_adv_example(attacker, train_data, data_name, epoch):
-    for  index, (x, y) in enumerate(train_data):
+    for  index, (x, y) in tqdm(enumerate(train_data)):
         x,y = torch.tensor(x).detach(), torch.tensor(y).detach()
         x_adv = attacker.atk(x,y).detach()
         path_x = os.path.join( os.getcwd(),'data', data_name , 'epoch_'+ str(epoch), 'X')
@@ -111,12 +112,16 @@ def train(args, model, device, train_loader, optimizer, epoch):
     model.train()
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
+        # print(data.shape)
+        data = data.reshape(-1, 1,28,28)
+        # print(data.shape)
+        # print(target.shape)
 
         optimizer.zero_grad()
 
         # calculate loss
         criterion = nn.CrossEntropyLoss()
-        loss = criterion(model(data).flatten(), target.flatten())
+        loss = criterion(model(data), target.reshape(-1))
         loss.backward()
         optimizer.step()
         if batch_idx % args.log_interval == 0:
@@ -207,6 +212,7 @@ def main():
         if len(model_list) > args.model_window:
             model_list.pop(0)
         # Generate adversarial example
+        print('--- generating adversarial examples ---')
         attacker = FTL_PGD(model_list,
                         epsilon = args.epsilon,
                         step_size = args.step_size,
@@ -220,6 +226,7 @@ def main():
                                                     shuffle=True,
                                                     **kwargs)
         # Train on the stacked train_loader
+        print('--- training ----')
         train(args, model, device, train_loader_i, optimizer, epoch)
         test(args, model, device, test_loader)
 
