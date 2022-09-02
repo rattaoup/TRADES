@@ -10,6 +10,18 @@ from tqdm import tqdm
 import os
 import os.path
 from torch.utils.data import Dataset
+import copy
+
+
+class IndexMNIST(Dataset):
+    def __init__(self, root, train, download=False, transform=None, target_transform = None):
+        self.data = datasets.MNIST(root, train=train, download=download, transform=transform, target_transform=target_transform )
+    
+    def __getitem__(self, index):
+        return index, self.data[index][0], self.data[index][1]
+
+    def __len__(self):
+        return self.data.__len__()
 
 
 class Net(nn.Module):
@@ -46,8 +58,6 @@ class FTL_PGD():
         self.perturb_steps = perturb_steps
         self.loss = loss
 
-        
-    
     def atk(self, images, labels):
 
         images = images.clone().detach().to(self.device)
@@ -77,57 +87,64 @@ class FTL_PGD():
 
         return adv_images
 
-def gen_save_adv_example(attacker, train_data, data_name, epoch):
-    for  index, (x, y) in tqdm(enumerate(train_data)):
-        x,y = torch.tensor(x).detach(), torch.tensor(y).detach()
-        x_adv = attacker.atk(x,y).detach()
-        path_x = os.path.join( os.getcwd(),'data', data_name , 'epoch_'+ str(epoch), 'X')
-        path_y = os.path.join( os.getcwd(),'data', data_name , 'epoch_'+ str(epoch), 'y')
-        os.makedirs(path_x, exist_ok = True)
-        os.makedirs(path_y, exist_ok = True)
-        torch.save(x_adv,  os.path.join(path_x, f"x_{index}.pth"))
-        torch.save(y,  os.path.join(path_y, f"y_{index}.pth"))
 
-class DatasetFTL(Dataset):
-    def __init__(self, data_name, epoch, data_window):
-        self.data_name = data_name
-        self.epoch = epoch
-        self.data_window = data_window
-        self.n_samples = len(os.listdir(os.path.join(os.getcwd(), 'data', data_name, 'epoch_'+ str(epoch), 'X')))
-    
-    def __getitem__(self, index):
-        x_list = []
-        y_list = []
-        for i in range(max(self.epoch+1 - self.data_window, 0), self.epoch +1 ):
-            x_list.append(torch.load(os.path.join(os.getcwd(), 'data', self.data_name, 'epoch_'+ str(i), 'X', f"x_{index}.pth")))
-            y_list.append(torch.load(os.path.join(os.getcwd(), 'data', self.data_name, 'epoch_'+ str(i), 'y', f"y_{index}.pth")))
-        x = torch.stack(x_list)
-        y = torch.stack(y_list)
-        return x,y
-
-    def __len__(self):
-        return self.n_samples
-
-def train(args, model, device, train_loader, optimizer, epoch):
+def train(args, model, model_list, data_list, device, train_loader, optimizer, epoch):
     model.train()
-    for batch_idx, (data, target) in enumerate(train_loader):
-        data, target = data.to(device), target.to(device)
-        # print(data.shape)
-        data = data.reshape(-1, 1,28,28)
-        # print(data.shape)
-        # print(target.shape)
+    data_list.append({'X': {}, 'y':{}})
+
+    # pop data list
+    if len(data_list)> args.data_window:
+        data_list.pop(0)
+    
+    # print(len(model_list))
+    for batch_idx, (idx, x, y) in enumerate(train_loader):
+        x, y = x.to(device), y.to(device)
+
+        # pop model list
+        if len(model_list) > args.model_window:
+            model_list.pop(0)
+
+        # generate adversarial example
+        attacker = FTL_PGD(model_list, epsilon = args.epsilon, step_size = args.step_size, perturb_steps = args.num_steps)
+        x_adv = attacker.atk(x,y)
+        for i in range(idx.shape[0]):
+            data_list[-1]['X'][idx[i].item()] = x_adv[i,:].cpu().detach()
+            data_list[-1]['y'][idx[i].item()] = y[i].cpu().detach()
+
+        # look up old stuff and stack up with the current x
+        x_old = []
+        y_old = []
+        if len(data_list) > 1:
+            # print(data_list[0]['y'])
+            for i in range(len(data_list) - 1):
+                for j in range(idx.shape[0]):
+                    x_old.append(data_list[i]['X'][idx[j].item()])
+                    y_old.append(data_list[i]['y'][idx[j].item()])
+
+            x_old = torch.stack(x_old)
+            y_old = torch.stack(y_old)
+            # print(x_old.shape)
+            # print(x_adv.shape)
+            x_adv = torch.vstack([x_adv, x_old])
+            y = torch.hstack([y, y_old])
+            # print(x_adv.shape)
+            # print(y.shape)
 
         optimizer.zero_grad()
 
         # calculate loss
         criterion = nn.CrossEntropyLoss()
-        loss = criterion(model(data), target.reshape(-1))
+        # print(print(x_adv.requires_grad))
+        loss = criterion(model(x_adv), y.reshape(-1))
         loss.backward()
         optimizer.step()
         if batch_idx % args.log_interval == 0:
             print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
-                epoch, batch_idx * len(data), len(train_loader.dataset),
+                epoch, batch_idx * len(x), len(train_loader.dataset),
                        100. * batch_idx / len(train_loader), loss.item()))
+        # add model into the list
+        model_temp = copy.deepcopy(model)
+        model_list.append(model_temp)
 
 
 def test(args, model, device, test_loader):
@@ -135,7 +152,7 @@ def test(args, model, device, test_loader):
     test_loss = 0
     correct = 0
     with torch.no_grad():
-        for data, target in test_loader:
+        for _, data, target in test_loader:
             data, target = data.to(device), target.to(device)
             output = model(data)
             test_loss += F.nll_loss(output, target, reduction='sum').item()  # sum up batch loss
@@ -166,7 +183,7 @@ def main():
                         help='disables CUDA training')
     parser.add_argument('--epsilon', default=0.1,
                         help='perturbation')
-    parser.add_argument('--num-steps', default=10,
+    parser.add_argument('--num-steps', type=int, default=10,
                         help='perturb number of steps')
     parser.add_argument('--step-size', default=0.02,
                         help='perturb step size')
@@ -177,7 +194,7 @@ def main():
     parser.add_argument('--log-interval', type=int, default=10, metavar='N',
                         help='how many batches to wait before logging training status')
 
-    parser.add_argument('--save-model', action='store_true', default=False,
+    parser.add_argument('--save-model', action='store_true', default=True,
                         help='For Saving the current Model')
     parser.add_argument('--model-window', type=int, default=1,
                         help='how many model we save for generating adversarial example')
@@ -191,13 +208,15 @@ def main():
     device = torch.device("cuda" if use_cuda else "cpu")
 
     kwargs = {'num_workers': 1, 'pin_memory': True} if use_cuda else {}
-    train_data = datasets.MNIST('../data', train=True, download=True,
+    train_loader = torch.utils.data.DataLoader(
+        IndexMNIST('../data', train=True, download=True,
                        transform=transforms.Compose([
                            transforms.ToTensor(),
-                       ]))
+                       ])),
+        batch_size=args.batch_size, shuffle=True, **kwargs)
 
     test_loader = torch.utils.data.DataLoader(
-        datasets.MNIST('../data', train=False, transform=transforms.Compose([
+        IndexMNIST('../data', train=False, transform=transforms.Compose([
             transforms.ToTensor(),
         ])),
         batch_size=args.test_batch_size, shuffle=True, **kwargs)
@@ -207,33 +226,16 @@ def main():
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
     
     model_list = [model]
+    data_list = []
     for epoch in range(1, args.epochs + 1):
 
-        if len(model_list) > args.model_window:
-            model_list.pop(0)
-        # Generate adversarial example
-        print('--- generating adversarial examples ---')
-        attacker = FTL_PGD(model_list,
-                        epsilon = args.epsilon,
-                        step_size = args.step_size,
-                        perturb_steps = args.num_steps)
-        gen_save_adv_example(attacker, train_data, 'MNIST', epoch)
-
-        # Generate a new trainloader
-        dataset_i = DatasetFTL('MNIST', epoch = epoch, data_window = args.data_window)
-        train_loader_i = torch.utils.data.DataLoader(dataset=dataset_i, 
-                                                    batch_size= args.batch_size, 
-                                                    shuffle=True,
-                                                    **kwargs)
-        # Train on the stacked train_loader
         print('--- training ----')
-        train(args, model, device, train_loader_i, optimizer, epoch)
+        train(args, model, model_list, data_list, device, train_loader, optimizer, epoch)
         test(args, model, device, test_loader)
-
+        
         # Save_model
-        torch.save(model.state_dict(), './checkpoint/'+ 'MNIST' + '_epoch_'+ str(epoch) + '.pth')
-        model_temp = copy.deepcopy(model)
-        model_list.append(model_temp)
+        # torch.save(model.state_dict(), './checkpoint/'+ 'MNIST' + '_epoch_'+ str(epoch) + '.pth')
+        
 
 
     if (args.save_model):
